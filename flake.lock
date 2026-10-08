@@ -1,0 +1,28 @@
+{
+  "nodes": {
+    "root": {
+      "inputs": {
+        "veshell": "veshell"
+      }
+    },
+    "veshell": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791368951,
+        "narHash": "sha256-t30elX5GkAl7vyGmRp0pvUvBMKVPRAH0d7rz3y2uFRk=",
+        "owner": "free-explorers",
+        "repo": "veshell",
+        "rev": "e954bb7ebcdfab7892249005c64ff7ba740930d3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "free-explorers",
+        "repo": "veshell",
+        "rev": "e954bb7ebcdfab7892249005c64ff7ba740930d3",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
