@@ -128,6 +128,29 @@
         libxcb
       ];
 
+      # --- EGL vendor discovery -------------------------------------------
+      # nixpkgs patches libEGL to search three directories for vendor ICDs:
+      # /etc/glvnd/egl_vendor.d, /run/opengl-driver/share/glvnd/egl_vendor.d and
+      # /usr/share/glvnd/egl_vendor.d. On NixOS only the second one can exist,
+      # and it appears solely because of `hardware.graphics.enable` — which is
+      # false by default and is turned on by neither services.xserver nor the
+      # Xfce module. No directory => no ICD => Mesa never gets asked, so the
+      # client extension list lacks EGL_KHR_platform_x11 and smithay's winit
+      # backend dies with Egl(DisplayNotSupported).
+      # /run/opengl-driver stays first (system drivers, incl. NVIDIA win);
+      # store Mesa is the fallback. It costs ~250 MB of closure, so it is a
+      # switch: set mesaFallback = false if your system has graphics enabled.
+      mesaFallback = true;
+
+      eglVendorDirs = lib.concatStringsSep ":" (
+        [ "/run/opengl-driver/share/glvnd/egl_vendor.d" ]
+        ++ lib.optional mesaFallback "${pkgs.mesa}/share/glvnd/egl_vendor.d"
+      );
+      driDriverDirs = lib.concatStringsSep ":" (
+        [ "/run/opengl-driver/lib/dri" ]
+        ++ lib.optional mesaFallback "${pkgs.mesa}/lib/dri"
+      );
+
       package = (pkgs.callPackage "${veshell}/nix/package.nix" {
         flutterSdk = flutter.flutterSdk;
         flutterEngine = flutterEngine;
@@ -141,8 +164,8 @@
             + ''
               wrapProgram "$out/bin/veshell" \
                 --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath x11RuntimeLibs}" \
-                --set-default __EGL_VENDOR_LIBRARY_DIRS "/run/opengl-driver/share/glvnd/egl_vendor.d" \
-                --set-default LIBGL_DRIVERS_PATH "/run/opengl-driver/lib/dri"
+                --set-default __EGL_VENDOR_LIBRARY_DIRS "${eglVendorDirs}" \
+                --set-default LIBGL_DRIVERS_PATH "${driDriverDirs}"
             '';
         });
       # Instant remedy for a package you have *already* built (or imported from
@@ -153,8 +176,8 @@
         # glvnd ищет ICD в /run/opengl-driver/share/glvnd/egl_vendor.d (nixpkgs
         # патчит этот путь в libEGL); store-овая mesa — запасной вариант, если
         # hardware.graphics не включён.
-        export __EGL_VENDOR_LIBRARY_DIRS="/run/opengl-driver/share/glvnd/egl_vendor.d:${pkgs.mesa}/share/glvnd/egl_vendor.d''${__EGL_VENDOR_LIBRARY_DIRS:+:''${__EGL_VENDOR_LIBRARY_DIRS}}"
-        export LIBGL_DRIVERS_PATH="/run/opengl-driver/lib/dri:${pkgs.mesa}/lib/dri''${LIBGL_DRIVERS_PATH:+:''${LIBGL_DRIVERS_PATH}}"
+        export __EGL_VENDOR_LIBRARY_DIRS="${eglVendorDirs}''${__EGL_VENDOR_LIBRARY_DIRS:+:''${__EGL_VENDOR_LIBRARY_DIRS}}"
+        export LIBGL_DRIVERS_PATH="${driDriverDirs}''${LIBGL_DRIVERS_PATH:+:''${LIBGL_DRIVERS_PATH}}"
         exec "$@"
       '';
 
