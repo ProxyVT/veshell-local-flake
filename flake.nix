@@ -97,17 +97,75 @@
         appLibrary = "${shellBundle}/lib/libapp.so";
       };
 
-      package = pkgs.callPackage "${veshell}/nix/package.nix" {
+      # --- zero-compilation routes ------------------------------------------
+      # (1) Upstream's published 15 MB binary payload (the AUR `veshell-bin`
+      #     artifact), unpacked and run through an FHS env. See binary.nix for
+      #     why the FHS env is unavoidable.
+      veshellBin = pkgs.callPackage ./binary.nix {
+        version = "0.1.0";
+        releaseTag = "v0.1.0";
+        # Checked against the release's published SHA256SUMS.
+        hash = "sha256-YVFYuel5Q9ndZavHvTRr0yqJL/k6VH6k/qjghax0LMw=";
+      };
+
+      # (2) Upstream's own release package (source-built engine). Building this
+      #     normally means compiling LLVM + Dart + the engine; after
+      #     ./import-binaries.sh has registered their attested closures it is a
+      #     no-op, because every output is already in the store.
+      veshellUpstream = (import "${veshell}/nix/release.nix").package;
+
+      # winit's X11 backend dlopens libX11 / libXi / libX11-xcb / libxcb at
+      # runtime (that is the `LibraryOpenError: libXi.so.6` you get from
+      # `VESHELL_BACKEND=winit` under X11). Upstream's nix/package.nix lists no
+      # X11 libraries. None of them are in DT_NEEDED, so stdenv's rpath
+      # shrinking removes their directories from the binary's RUNPATH — what
+      # actually rescues dlopen is LD_LIBRARY_PATH in the wrapper.
+      # libxkbcommon-x11.so.0 needs no help: it lives next to libxkbcommon.so.0,
+      # which *is* in DT_NEEDED, so that directory survives shrinking.
+      x11RuntimeLibs = with pkgs; [
+        libX11 # libX11.so.6 + libX11-xcb.so.1
+        libXi
+        libxcb
+      ];
+
+      package = (pkgs.callPackage "${veshell}/nix/package.nix" {
         flutterSdk = flutter.flutterSdk;
         flutterEngine = flutterEngine;
         inherit shellBundle;
         cargoHash = dependencies.cargoHash;
-      };
+      }).overrideAttrs
+        (old: {
+          buildInputs = (old.buildInputs or [ ]) ++ x11RuntimeLibs;
+          postFixup =
+            (old.postFixup or "")
+            + ''
+              wrapProgram "$out/bin/veshell" \
+                --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath x11RuntimeLibs}" \
+                --set-default __EGL_VENDOR_LIBRARY_DIRS "/run/opengl-driver/share/glvnd/egl_vendor.d" \
+                --set-default LIBGL_DRIVERS_PATH "/run/opengl-driver/lib/dri"
+            '';
+        });
+      # Instant remedy for a package you have *already* built (or imported from
+      # upstream's closure): just prepend the missing X11 libraries.
+      #   nix run .#veshell-run -- ./result/bin/veshell
+      veshellRun = pkgs.writeShellScriptBin "veshell-run" ''
+        export LD_LIBRARY_PATH="${lib.makeLibraryPath x11RuntimeLibs}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
+        # glvnd ищет ICD в /run/opengl-driver/share/glvnd/egl_vendor.d (nixpkgs
+        # патчит этот путь в libEGL); store-овая mesa — запасной вариант, если
+        # hardware.graphics не включён.
+        export __EGL_VENDOR_LIBRARY_DIRS="/run/opengl-driver/share/glvnd/egl_vendor.d:${pkgs.mesa}/share/glvnd/egl_vendor.d''${__EGL_VENDOR_LIBRARY_DIRS:+:''${__EGL_VENDOR_LIBRARY_DIRS}}"
+        export LIBGL_DRIVERS_PATH="/run/opengl-driver/lib/dri:${pkgs.mesa}/lib/dri''${LIBGL_DRIVERS_PATH:+:''${LIBGL_DRIVERS_PATH}}"
+        exec "$@"
+      '';
+
     in
     {
       packages.${system} = {
         default = package;
         veshell = package;
+        veshell-bin = veshellBin;
+        veshell-run = veshellRun;
+        veshell-upstream = veshellUpstream;
         # Exposed so each stage can be built/inspected on its own:
         #   nix build .#flutterEngine   (~98 MB download, no compilation)
         #   nix build .#flutterSdk      (official Flutter 3.47.2 + artifacts)
@@ -130,7 +188,23 @@
       nixosModules.default = { lib, ... }: {
         imports = [ "${veshell}/nix/module.nix" ];
         programs.veshell.package = lib.mkDefault self.packages.${system}.veshell;
+
+        # Same X11 dlopen fix, for the *session* path: the packaged user unit
+        # ExecStart's the binary directly, bypassing any interactive wrapper.
+        # Redundant for packages built by this flake, but it also rescues a
+        # package that came from an imported upstream closure.
+        systemd.user.services.veshell.serviceConfig.Environment = [
+          "LD_LIBRARY_PATH=${lib.makeLibraryPath x11RuntimeLibs}"
+        ];
       };
       nixosModules.veshell = self.nixosModules.default;
+
+      # Not packages: the pinned upstream checkout, for ./import-binaries.sh.
+      legacyPackages.${system} = {
+        veshellSrc = veshell;
+        veshellRev = veshell.sourceInfo.rev;
+        # The nixpkgs revision this flake builds against (upstream's pin).
+        pinnedPkgs = pkgs;
+      };
     };
 }
