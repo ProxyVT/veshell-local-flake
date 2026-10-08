@@ -142,13 +142,31 @@
       # switch: set mesaFallback = false if your system has graphics enabled.
       mesaFallback = true;
 
+      # The two variables deliberately have *different* orderings.
+      #
+      # glvnd walks every vendor ICD and skips the ones that fail to load
+      # (verified experimentally), so the system directory goes first and a
+      # system NVIDIA ICD keeps priority.
       eglVendorDirs = lib.concatStringsSep ":" (
         [ "/run/opengl-driver/share/glvnd/egl_vendor.d" ]
         ++ lib.optional mesaFallback "${pkgs.mesa}/share/glvnd/egl_vendor.d"
       );
+
+      # Mesa's dri/gbm loader is the opposite: it takes the first directory that
+      # has the file and does NOT fall through when the dlopen fails. A system
+      # Mesa built against a newer glibc than this package therefore kills GBM
+      # outright, and the error surfaces misleadingly as a missing device:
+      #   MESA-LOADER: failed to open dri: .../glibc-2.42-84/lib/libm.so.6:
+      #     version `GLIBC_2.43' not found (required by
+      #     /run/opengl-driver/lib/libgallium-26.1.2.so)
+      #     (search paths /run/opengl-driver/lib/gbm, suffix _gbm)
+      #   Error: "failed to open GBM device /dev/dri/renderD128: No such file or
+      #     directory (os error 2)"
+      # So the Mesa from this flake's own nixpkgs pin goes first: its glibc
+      # matches the binary by construction.
       driDriverDirs = lib.concatStringsSep ":" (
-        [ "/run/opengl-driver/lib/dri" ]
-        ++ lib.optional mesaFallback "${pkgs.mesa}/lib/dri"
+        lib.optional mesaFallback "${pkgs.mesa}/lib/dri"
+        ++ [ "/run/opengl-driver/lib/dri" ]
       );
 
       package = (pkgs.callPackage "${veshell}/nix/package.nix" {
