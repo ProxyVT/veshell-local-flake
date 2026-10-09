@@ -142,31 +142,42 @@
       # switch: set mesaFallback = false if your system has graphics enabled.
       mesaFallback = true;
 
-      # The two variables deliberately have *different* orderings.
+      # --- Mesa's two search paths -------------------------------------------
+      # src/loader/loader.c: loader_open_driver_lib() walks every colon-separated
+      # entry and only gives up when *all* dlopens fail, so the system directory
+      # goes first: a matching system driver wins, a glibc-skewed one is skipped
+      # in favour of the Mesa from this flake's own nixpkgs pin. Both variables
+      # are ignored for root (the `__normal_user()` gate in mesa).
       #
-      # glvnd walks every vendor ICD and skips the ones that fail to load
-      # (verified experimentally), so the system directory goes first and a
-      # system NVIDIA ICD keeps priority.
-      eglVendorDirs = lib.concatStringsSep ":" (
-        [ "/run/opengl-driver/share/glvnd/egl_vendor.d" ]
-        ++ lib.optional mesaFallback "${pkgs.mesa}/share/glvnd/egl_vendor.d"
-      );
-
-      # Mesa's dri/gbm loader is the opposite: it takes the first directory that
-      # has the file and does NOT fall through when the dlopen fails. A system
-      # Mesa built against a newer glibc than this package therefore kills GBM
-      # outright, and the error surfaces misleadingly as a missing device:
+      #   LIBGL_DRIVERS_PATH  -> <dir>/dri/*_dri.so        (DRI drivers)
+      #   GBM_BACKENDS_PATH   -> <dir>/gbm/*_gbm.so        (GBM backends)
+      #
+      # GBM_BACKENDS_PATH is the one that bites: nixpkgs builds mesa-libgbm with
+      # -Dgbm-backends-path=${libglvnd.driverLink}/lib/gbm, i.e. the compiled-in
+      # default is a *single* path /run/opengl-driver/lib/gbm. With no fallback
+      # entry, a system Mesa built against a newer glibc than this package kills
+      # GBM outright and the error masquerades as a missing device:
       #   MESA-LOADER: failed to open dri: .../glibc-2.42-84/lib/libm.so.6:
       #     version `GLIBC_2.43' not found (required by
       #     /run/opengl-driver/lib/libgallium-26.1.2.so)
       #     (search paths /run/opengl-driver/lib/gbm, suffix _gbm)
       #   Error: "failed to open GBM device /dev/dri/renderD128: No such file or
       #     directory (os error 2)"
-      # So the Mesa from this flake's own nixpkgs pin goes first: its glibc
-      # matches the binary by construction.
+      # glvnd walks every vendor ICD and skips the ones that fail to load
+      # (verified experimentally), so a broken or glibc-skewed system ICD is not
+      # fatal: the store Mesa below is still tried, and a system NVIDIA ICD keeps
+      # priority when it works.
+      eglVendorDirs = lib.concatStringsSep ":" (
+        [ "/run/opengl-driver/share/glvnd/egl_vendor.d" ]
+        ++ lib.optional mesaFallback "${pkgs.mesa}/share/glvnd/egl_vendor.d"
+      );
       driDriverDirs = lib.concatStringsSep ":" (
-        lib.optional mesaFallback "${pkgs.mesa}/lib/dri"
-        ++ [ "/run/opengl-driver/lib/dri" ]
+        [ "/run/opengl-driver/lib/dri" ]
+        ++ lib.optional mesaFallback "${pkgs.mesa}/lib/dri"
+      );
+      gbmBackendDirs = lib.concatStringsSep ":" (
+        [ "/run/opengl-driver/lib/gbm" ]
+        ++ lib.optional mesaFallback "${pkgs.mesa}/lib/gbm"
       );
 
       package = (pkgs.callPackage "${veshell}/nix/package.nix" {
@@ -183,19 +194,34 @@
               wrapProgram "$out/bin/veshell" \
                 --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath x11RuntimeLibs}" \
                 --set-default __EGL_VENDOR_LIBRARY_DIRS "${eglVendorDirs}" \
-                --set-default LIBGL_DRIVERS_PATH "${driDriverDirs}"
+                --set-default LIBGL_DRIVERS_PATH "${driDriverDirs}" \
+                --set-default GBM_BACKENDS_PATH "${gbmBackendDirs}"
             '';
         });
       # Instant remedy for a package you have *already* built (or imported from
       # upstream's closure): just prepend the missing X11 libraries.
       #   nix run .#veshell-run -- ./result/bin/veshell
       veshellRun = pkgs.writeShellScriptBin "veshell-run" ''
+        if [ "$#" -eq 0 ]; then
+          echo "usage: veshell-run PROGRAM [ARGS...]" >&2
+          echo "example: nix run .#veshell-run -- env VESHELL_BACKEND=winit \$HOME/result/bin/veshell" >&2
+          exit 2
+        fi
+        # `nix run` keeps the caller's cwd, and the build's ./result symlink is
+        # usually somewhere else — say so instead of letting exec fail cryptically.
+        target="$1"
+        if [ ! -e "$target" ] && ! command -v "$target" >/dev/null 2>&1; then
+          echo "veshell-run: '$target' не найден (cwd=$(pwd))" >&2
+          echo "veshell-run: путь к бинарю абсолютный? например \$HOME/result/bin/veshell" >&2
+          exit 127
+        fi
         export LD_LIBRARY_PATH="${lib.makeLibraryPath x11RuntimeLibs}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
         # glvnd ищет ICD в /run/opengl-driver/share/glvnd/egl_vendor.d (nixpkgs
         # патчит этот путь в libEGL); store-овая mesa — запасной вариант, если
         # hardware.graphics не включён.
         export __EGL_VENDOR_LIBRARY_DIRS="${eglVendorDirs}''${__EGL_VENDOR_LIBRARY_DIRS:+:''${__EGL_VENDOR_LIBRARY_DIRS}}"
         export LIBGL_DRIVERS_PATH="${driDriverDirs}''${LIBGL_DRIVERS_PATH:+:''${LIBGL_DRIVERS_PATH}}"
+        export GBM_BACKENDS_PATH="${gbmBackendDirs}''${GBM_BACKENDS_PATH:+:''${GBM_BACKENDS_PATH}}"
         exec "$@"
       '';
 
